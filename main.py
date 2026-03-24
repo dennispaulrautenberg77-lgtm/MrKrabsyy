@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 # KONFIGURATION  –  Hier anpassen!
 # ══════════════════════════════════════════════════════════════════
 
-BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")  # Als Secret 'BOT_TOKEN' hinterlegen
-ADMIN_IDS      = [8271107366]            # Deine Telegram User-ID(en)
+BOT_TOKEN      = "8693790416:AAEq24ADNbig5x5pBsv8vuHxR_3Dz-U-pnk"
+ADMIN_IDS      = [8271107366]
 DATA_FILE      = "shop_data.json"
 PENDING_FILE   = "pending_orders.json"
 CHECK_INTERVAL = 30          # Sekunden zwischen Blockchain-Checks
