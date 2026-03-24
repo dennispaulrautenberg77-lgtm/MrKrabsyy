@@ -121,135 +121,134 @@ async def get_incoming_ltc(address: str, since_timestamp: int) -> list:
 # HINTERGRUND-TASK: Zahlungen prüfen
 # ──────────────────────────────────────────────────────────────────
 
-async def payment_checker_loop(app: Application):
+async def payment_checker_loop(context: ContextTypes.DEFAULT_TYPE):
     """
-    Laeuft im Hintergrund. Prueft alle 'CHECK_INTERVAL' Sekunden,
-    ob eine offene Bestellung eine passende LTC-Zahlung erhalten hat.
+    Wird vom Job-Queue alle CHECK_INTERVAL Sekunden aufgerufen.
+    Prueft ob offene Bestellungen eine passende LTC-Zahlung erhalten haben.
     """
-    while True:
-        await asyncio.sleep(CHECK_INTERVAL)
-        try:
-            pending  = load_pending()
-            data     = load_data()
-            ltc_addr = data.get("ltc_address", "")
+    app = context.application
+    try:
+        pending  = load_pending()
+        data     = load_data()
+        ltc_addr = data.get("ltc_address", "")
 
-            if not pending or not ltc_addr:
+        if not pending or not ltc_addr:
+            return
+
+        now          = int(time.time())
+        oldest_ts    = now - ORDER_TIMEOUT
+        transactions = await get_incoming_ltc(ltc_addr, oldest_ts)
+        used_txids   = {o.get("txid") for o in data.get("orders", []) if o.get("txid")}
+        to_remove    = []
+
+        for order_id, order in list(pending.items()):
+
+            if now - order["created_at"] > ORDER_TIMEOUT:
+                to_remove.append(order_id)
+                try:
+                    await app.bot.send_message(
+                        order["user_id"],
+                        f"⏰ *Bestellung abgelaufen*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"Deine Bestellung für *{order['product_name']}* ist nach 60 Minuten abgelaufen.\n\n"
+                        f"👉 Tippe /start für einen neuen Versuch.",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
                 continue
 
-            now          = int(time.time())
-            oldest_ts    = now - ORDER_TIMEOUT
-            transactions = await get_incoming_ltc(ltc_addr, oldest_ts)
-            used_txids   = {o.get("txid") for o in data.get("orders", []) if o.get("txid")}
-            to_remove    = []
+            expected_ltc = float(order["price"])
 
-            for order_id, order in list(pending.items()):
-
-                if now - order["created_at"] > ORDER_TIMEOUT:
-                    to_remove.append(order_id)
-                    try:
-                        await app.bot.send_message(
-                            order["user_id"],
-                            f"⏰ *Bestellung abgelaufen*\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                            f"Deine Bestellung für *{order['product_name']}* ist nach 60 Minuten abgelaufen.\n\n"
-                            f"👉 Tippe /start für einen neuen Versuch.",
-                            parse_mode="Markdown"
-                        )
-                    except Exception:
-                        pass
+            for tx in transactions:
+                if tx["txid"] in used_txids:
+                    continue
+                if abs(tx["amount_ltc"] - expected_ltc) > LTC_TOLERANCE:
                     continue
 
-                expected_ltc = float(order["price"])
+                pid = order["product_id"]
+                p   = data["products"].get(pid)
 
-                for tx in transactions:
-                    if tx["txid"] in used_txids:
-                        continue
-                    if abs(tx["amount_ltc"] - expected_ltc) > LTC_TOLERANCE:
-                        continue
-
-                    pid = order["product_id"]
-                    p   = data["products"].get(pid)
-
-                    if not p or not p.get("items"):
-                        try:
-                            await app.bot.send_message(
-                                order["user_id"],
-                                "\u26a0\ufe0f *Zahlung erhalten* \u2013 Produkt jedoch ausverkauft!\n"
-                                "Bitte kontaktiere den Support.",
-                                parse_mode="Markdown"
-                            )
-                        except Exception:
-                            pass
-                        to_remove.append(order_id)
-                        for aid in ADMIN_IDS:
-                            try:
-                                await app.bot.send_message(
-                                    aid,
-                                    f"\u26a0\ufe0f Zahlung erhalten aber *{p['name'] if p else pid}* ausverkauft!\n"
-                                    f"User: @{order.get('username','?')} | {tx['amount_ltc']} LTC",
-                                    parse_mode="Markdown"
-                                )
-                            except Exception:
-                                pass
-                        break
-
-                    item = p["items"].pop(0)
-                    data["orders"].append({
-                        "user_id":   order["user_id"],
-                        "username":  order.get("username", ""),
-                        "product":   p["name"],
-                        "price":     order["price"],
-                        "item":      item,
-                        "txid":      tx["txid"],
-                        "timestamp": now
-                    })
-                    used_txids.add(tx["txid"])
-                    save_data(data)
-                    to_remove.append(order_id)
-
+                if not p or not p.get("items"):
                     try:
                         await app.bot.send_message(
                             order["user_id"],
-                            f"🎉 *Zahlung bestätigt!*\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                            f"🛍 Produkt: *{p['name']}*\n"
-                            f"💰 Betrag: `{tx['amount_ltc']} LTC`\n"
-                            f"🔗 TX: `{tx['txid'][:20]}...`\n\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🔑 *Dein Inhalt:*\n"
-                            f"┌─────────────────────\n"
-                            f"│ `{item}`\n"
-                            f"└─────────────────────\n\n"
-                            f"📩 *Bitte sicher aufbewahren!*\n"
-                            f"Danke für deinen Einkauf! 🙏",
+                            "⚠️ *Zahlung erhalten* – Produkt jedoch ausverkauft!\n"
+                            "Bitte kontaktiere den Support.",
                             parse_mode="Markdown"
                         )
                     except Exception:
                         pass
-
+                    to_remove.append(order_id)
                     for aid in ADMIN_IDS:
                         try:
                             await app.bot.send_message(
                                 aid,
-                                f"💰 *Neuer Verkauf!*\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                                f"👤 Käufer: @{order.get('username','?')}\n"
-                                f"📦 Produkt: *{p['name']}*\n"
-                                f"💸 Betrag: `{order['price']} LTC`\n"
-                                f"📊 Restbestand: *{len(p['items'])}x*\n"
-                                f"🔗 TX: `{tx['txid'][:20]}...`",
+                                f"⚠️ Zahlung erhalten aber *{p['name'] if p else pid}* ausverkauft!\n"
+                                f"User: @{order.get('username','?')} | {tx['amount_ltc']} LTC",
                                 parse_mode="Markdown"
                             )
                         except Exception:
                             pass
                     break
 
-            for oid in to_remove:
-                pending.pop(oid, None)
-            save_pending(pending)
+                item = p["items"].pop(0)
+                data["orders"].append({
+                    "user_id":   order["user_id"],
+                    "username":  order.get("username", ""),
+                    "product":   p["name"],
+                    "price":     order["price"],
+                    "item":      item,
+                    "txid":      tx["txid"],
+                    "timestamp": now
+                })
+                used_txids.add(tx["txid"])
+                save_data(data)
+                to_remove.append(order_id)
 
-        except Exception as e:
-            logger.error(f"payment_checker Fehler: {e}")
+                try:
+                    await app.bot.send_message(
+                        order["user_id"],
+                        f"🎉 *Zahlung bestätigt!*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"🛍 Produkt: *{p['name']}*\n"
+                        f"💰 Betrag: `{tx['amount_ltc']} LTC`\n"
+                        f"🔗 TX: `{tx['txid'][:20]}...`\n\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🔑 *Dein Inhalt:*\n"
+                        f"┌─────────────────────\n"
+                        f"│ `{item}`\n"
+                        f"└─────────────────────\n\n"
+                        f"📩 *Bitte sicher aufbewahren!*\n"
+                        f"Danke für deinen Einkauf! 🙏",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
+
+                for aid in ADMIN_IDS:
+                    try:
+                        await app.bot.send_message(
+                            aid,
+                            f"💰 *Neuer Verkauf!*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                            f"👤 Käufer: @{order.get('username','?')}\n"
+                            f"📦 Produkt: *{p['name']}*\n"
+                            f"💸 Betrag: `{order['price']} LTC`\n"
+                            f"📊 Restbestand: *{len(p['items'])}x*\n"
+                            f"🔗 TX: `{tx['txid'][:20]}...`",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+                break
+
+        for oid in to_remove:
+            pending.pop(oid, None)
+        save_pending(pending)
+
+    except Exception as e:
+        logger.error(f"payment_checker Fehler: {e}")
 
 # ──────────────────────────────────────────────────────────────────
 # SHOP – Kundenbereich
@@ -617,8 +616,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cancel_order,  pattern=r"^cancel_"))
     app.add_handler(CallbackQueryHandler(back_shop,     pattern=r"^back_shop$"))
 
-    loop = asyncio.get_event_loop()
-    loop.create_task(payment_checker_loop(app))
+    app.job_queue.run_repeating(payment_checker_loop, interval=CHECK_INTERVAL, first=10)
 
     logger.info("Bot startet...")
     app.run_polling(drop_pending_updates=True)
